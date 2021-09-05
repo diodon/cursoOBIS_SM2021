@@ -1,0 +1,232 @@
+---
+title: "Cobertura de Algas en Isla Gorgona"
+author: 'E. Klein'
+date: "2021-08-20"
+output: 
+  html_document:
+    toc:  TRUE
+    toc_float: TRUE
+    theme: united
+    highlight: tango
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, cache = F, echo = F, message = F, warning = F, tidy = F}
+# make this an external chunk that can be included in any file
+require(knitr)
+options(width = 100)
+opts_chunk$set(echo =T, message = F, error = F, warning = F, comment = NA,  
+               fig.align = 'left',  fig.width = 7.5, fig.height = 6,
+               tidy = F, cache.path = '.cache/', fig.path = 'fig/')
+               
+library(RColorBrewer)
+palette(brewer.pal(8, "Set2"))
+
+library(robis)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(kableExtra)
+library(tidyr)
+library(dplyr)
+
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+```
+
+last run `r Sys.time()`
+
+## Introducción
+
+Cuando se solicita la tabla de ocurrencias de alguna(s) especie(s) para alguna región, es posible obtener las medidas o atributos asociados a cada registro. La tabla contendrá entonces una nueva variable, en forma de lista, que contiene los atributos (MoF).
+
+Para trabajar con los MoF, el paquete robis tiene una función que permite extraer los MoF en forma de tabla. Luego hay que juntar estos datos con los registros de ocurrencia mediante el uso del occurrenceID (en este caso, el occurrenceID es generado internamente por OBIS) .
+
+Para este ejemplo, vamos a usar el conjunto de datos "MBON POLE TO POLE: ROCKY SHORE BIODIVERSITY OF GORGONA ISLAND" uno de los sitios de muestreo del proyecto de monitoreo continental denominado Biodiversidad Marina de Polo a Polo. Los datos de abundancia y cobertura de litorales rocosos a lo largo de las costas de América son colectados usando un mismo protocolo estandarizado y los datos reportados a OBIS. Este conjunto de datos particular tiene como datasetID "871e92ab-2a00-4851-b948-cb6dda862f9c"
+
+Como pregunta de investigación queremos evaluar los porcentajes promedio de cobertura de algas en los estratos mareales bajo y medio. El estrato de muestreo está codificado en la variable occurrenceID por lo que tendremos que extraerlo. Por ejemplo, podrán ubicar la palabra "LOWTIDE" en el siguiente ID:
+
+COLOMBIA_ISLAGORGONA_LAVENTANA_20181011_LOWTIDE_R010-00203
+
+En realidad, el occurrenceID en este proyecto está muy bien codificado de forma de que puede reconocerse el país, el sitio, la localidad, la fecha, el estrato, la cuadrata y el número del organismo identificado en esa cuadrata. Los campos están separados por "\_". Note que cada conjunto de datos es diferente por lo que es necesario conocer más detalles de cómo los datos fueron colectados y codificados.
+
+El proceso de análisis es el siguiente:
+
+1.  Descargar la tabla de datos de ocurrencia
+2.  Extraer las localidades y estratos de muestreo
+3.  Extraer los MoF
+4.  Crear una única tabla con las ocurrencias y la cobertura
+5.  Calcular la cobertura promedio de las algas en cada estrato/localidad
+6.  Visualizar los datos
+
+## Descarga de datos
+
+Usando la función `occurrence` y sabiendo el id del dataset procedemos a descargar los datos. Es necesario especificar el argumento `mof = TRUE` para que los MoF sean descargados junto con las ocurrencias
+
+```{r getData}
+gorgo <- occurrence(datasetid = "871e92ab-2a00-4851-b948-cb6dda862f9c", mof = TRUE)
+```
+
+El número de registros de este conjunto de datos es `r nrow(gorgo)`
+
+### Localidades
+
+Como se mencionó anteriormente, las localidades y los estratos de muestreo están codificados en el `occurrenceID`, por lo que se requiere extraer esos identificadores de esa variable. Para ello vamos a partir el `occurrenceID` en los diferentes campos y selecciones los que nos interesan: Localidad y Estrato, que se encuentran en las posiciones 3 y 5 respectivamente
+
+```{r parseID}
+gorgo$Localidad <- str_split(gorgo$occurrenceID, "_", simplify = TRUE)[,3]
+gorgo$Estrato <- str_split(gorgo$occurrenceID, "_", simplify = TRUE)[,5]
+```
+
+Las localidades muestreadas en Isla Gorgona son
+
+```{r Localitytable}
+gorgoLocalidad <- gorgo %>% group_by(Localidad) %>% 
+    summarise(Latitud = mean(decimalLatitude), 
+              Longitud = mean(decimalLongitude))
+
+kable(gorgoLocalidad) %>% kable_styling("striped")
+
+```
+
+que podemos visualizar en un mapa interactivo
+
+```{r LocalityMap}
+map_leaflet(gorgo, provider_tiles = "Esri.WorldImagery")
+```
+
+En este caso la localidad de "La Ventana", los estratos están identificados cada uno por su coordenada y separados entre si por unos 50 metros.
+
+### Estratos
+
+El protocolo MBON requiere muestrear en los estratos mareales bajo, medio y alto. Este es el número total de organismos (taxa) reportados que hay en cada estrato de cada localidad
+
+```{r estratoTable}
+gorgoEstrato <- gorgo %>% group_by(Localidad, Estrato) %>% 
+    summarise(n = n())
+
+kable(gorgoEstrato) %>% kable_styling("striped")
+```
+
+Notarán que el estrato superior presenta una menor abundancia de taxa que los otros estratos.
+
+## Extraer los MoF
+
+Este conjunto de datos reporta como MoF las variables abundancia y cobertura de los organismos. La función `measurements` extrae los MoF de la lista que está incluida en la tabla de ocurrencias:
+
+```{r MoFextract}
+gorgoMoF <- measurements(gorgo)
+```
+
+Podemos observar que la tabla contiene solamente dos tipos de atributos (`measurementType`): "cover" y "abundance".
+
+Vamos a crear una tabla de datos simplificada que contenga el `occurrenceID` y los valores de cobertura y abundancia solamente. Aquí transformaremos y reduciremos la tabla original a un formato ancho:
+
+```{r MoFwide}
+gorgoMoF_wide <- gorgoMoF %>% pivot_wider(id_cols = "occurrenceID", names_from = "measurementType", values_from = "measurementValue")
+
+## convertimos los valores a numéricos
+gorgoMoF_wide$cover <- as.numeric(gorgoMoF_wide$cover)
+gorgoMoF_wide$abundance <- as.numeric(gorgoMoF_wide$abundance)
+```
+
+Como se puede ver, la nueva tabla contiene solamente tres columnas con los datos de cobertura y abundancia. El protocolo indica que la cobertura se determina en organismos que no pueden ser contados individualmente (como las algas por ejemplo), por lo que cuando hay cobertura no hay abundancia, y viceversa. La cobertura está medida en porcentaje.
+
+```{r MoFwideTable}
+kable(head(gorgoMoF_wide)) %>% kable_styling("striped")
+```
+
+### Combinar las tablas
+
+Como nuestra pregunta está relacionada con la cobertura de algas, vamos a filtrar la tabla de ocurrencias para que sólo contenga especies de algas y descartamos los otros organismos. Conservamos también el `occurrenceID` , `eventDate`, `scientificName`, y la `Localidad` y `Estrato` que creamos mas arriba. Para seleccionar las algas solamente filtramos las líneas por Kingdom (reino) Plantae
+
+```{r occReduce}
+gorgoAlgae <- gorgo %>% filter(kingdom == "Plantae") %>% 
+    select(occurrenceID, Localidad, Estrato, eventDate, scientificName, scientificNameID)
+
+```
+
+Vamos entonces a juntar la tabla de los MoF (reacomodada y solo con la cobertura) con la tabla de las ocurrencias (reducida), usando como índice la variable `occurrenceID`:
+
+```{r MoFjoin}
+gorgoAlgae <- left_join(gorgoAlgae, gorgoMoF_wide[,c("occurrenceID", "cover")])
+
+```
+
+## Cobertura promedio de Algas
+
+Para calcular la cobertura pormedio de algas por Estrato y Localidad es necesario primero calcular la cobertura total de algas por cuadrata, si queremos tener alguna medida de variabilidad dentro de cada estrato. Procedemos al igual que lo hicimos anteriormente, a extraer la cuadrata del `occurrenceID`, tomando nota que es la última de las variables pero que tiene añadido el número del organismo (que no necesitamos). Ejemplo:
+
+> COLOMBIA_ISLAGORGONA_PLAYAVERDE_20181014_LOWTIDE_R009-00322
+
+En este caso, es la cuadrata \#9 (R009)
+
+Haremos un "doble split":
+
+```{r getQuadrat}
+gorgoAlgae$Cuadrata <- str_split(str_split(gorgoAlgae$occurrenceID, "_", simplify = TRUE)[,6], "-", simplify = TRUE)[,1]
+
+```
+
+Ahora, calculamos la cobertura total sumando todas las coberturas de cada cuadrata/estrato/localidad:
+
+```{r quadratTotalCover}
+gorgoAlgae_cuadrata <- gorgoAlgae %>% group_by(Localidad, Estrato, Cuadrata) %>% 
+    summarise(coberturaTotal = sum(cover, na.rm=T))
+
+```
+
+Ya tenemos entonces una tabla con las coberturas totales de alga por cuadrata y que podemos usar para calcular la cobertura promedio por estrato y algunos estadísticos:
+
+```{r meanCover}
+gorgoAlgae_promedio <- gorgoAlgae_cuadrata %>% group_by(Localidad, Estrato) %>% 
+    summarise(coverMean = mean(coberturaTotal, na.rm=T), 
+              coverMax = max(coberturaTotal, na.rm=T),
+              coverMin = min(coberturaTotal, na.rm=T),
+              n = n())
+
+```
+
+e imprimir una tabla resumen:
+
+```{r meanCoverTable}
+kable(gorgoAlgae_promedio, col.names = c("Localidad", "Estrato", "Promedio", "Máximo", "Mínimo", "n"), caption = "Cobertura promedio (%) por estrato y localidad. Isla Gorgona") %>% 
+    kable_styling("striped")
+
+```
+
+## Visualización
+
+Una manera interesante de ver estos resultados es a través de un gráfico Box-Plot:
+
+```{r coverPlot, fig.width=12}
+
+## reordenamos los estratos para mejor visulaización
+gorgoAlgae_cuadrata$Estrato = factor(gorgoAlgae_cuadrata$Estrato,
+                                     levels = c("LOWTIDE",  "MIDTIDE", "HIGHTIDE"), 
+                                     labels = c("BAJO", "MEDIO", "ALTO"))
+pp = ggplot(gorgoAlgae_cuadrata, aes(Estrato, coberturaTotal, group=Estrato))
+pp + geom_boxplot(aes(fill=Estrato)) + 
+    facet_grid(~Localidad) + 
+    theme_pubclean()
+```
+
+Se puede apreciar cómo la cobertura de algas es mucho mayor en la localidad de La Ventana en el estrato bajo. Las algas no toleran la desecación por lo que es esperado que en el estrato alto no estén presentes o si lo están, con una cobertura muy baja.
+
+## Conclusión
+
+Mediante el paquete `robis` es posible extraer los MoF de los conjuntos de datos y con algunas operaciones en R crear una tabla donde se juntan las ocurrencias con los MoF de interés.
+
+El conocer cómo manipular las tablas de datos es fundamental para poder analizar conjuntamente las ocurrencias y los atributos de esas ocurrencias.
+
+## Ejercicios adicionales
+
+Aquí algunas sugerencias de análisis:
+
+1.  Calcular la riqueza de especies promedio por estrato y por cuadrata
+2.  Calcular algún índice de diversidad por cuadrata
+3.  ¿Cuáles son las especies mas abundantes o que tienen mayor cobertura?
+
+Con algunas modificaciones a este código es posible dar respuesta a estas y muchas mas preguntas!
